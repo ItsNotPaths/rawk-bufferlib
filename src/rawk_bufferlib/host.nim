@@ -18,6 +18,10 @@ type
     onTabsChanged*:   proc()                 {.closure.}
       ## Called when the tab set changes (add / close / reorder / dirty flip).
       ## Host typically uses this to repaint its tab-strip widget.
+    scopeGuides*:     proc(): bool           {.closure.}
+      ## Returns true if the editor should overlay indent / brace scope
+      ## guides on each row. Nil-treated-as-true so existing hosts opt in
+      ## automatically.
 
 # --- defaults ---------------------------------------------------------------
 # A minimal host with sane defaults so consumers can `let h = defaultHost()`
@@ -30,4 +34,5 @@ proc defaultHost*(): EditorHost =
     cursorMode:      proc(): CursorMode     = cmInsert,
     cursorJumpLines: proc(): int            = 10,
     recordOpen:      proc(path: string)     = discard,
-    onTabsChanged:   proc()                 = discard)
+    onTabsChanged:   proc()                 = discard,
+    scopeGuides:     proc(): bool           = true)

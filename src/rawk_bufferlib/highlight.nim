@@ -21,6 +21,8 @@ type
     commentOpen*, commentClose*: string
     stringDelims*: set[char]
     operators*: set[char]
+    braces*: set[char]   # populated when `block_style: braces` — used by the
+                         # editor to track {/} nesting for scope guides.
 
   ExtraTheme* = object
     ## Color slots luigi's UITheme doesn't expose. The host populates these
@@ -82,6 +84,9 @@ proc parseRule(name, body: string): SyntaxRule =
     of "keywords":
       for kw in val.split({' ', '\t'}):
         if kw.len > 0: result.keywords.incl(kw)
+    of "block_style":
+      if val == "braces":
+        result.braces = {'{', '}'}
     else: discard            # scope_* keys reserved for future tmTheme loader
 
 proc loadAllSyntaxes*() =
@@ -115,10 +120,15 @@ proc matchesAt(line: string, i: int, s: string): bool {.inline.} =
   return true
 
 proc tokenizeLine*(line: string, rule: ptr SyntaxRule,
-                   prevState: uint8, spans: var seq[Span]): uint8 =
+                   prevState: uint8, spans: var seq[Span],
+                   braceDelta: ptr int = nil): uint8 =
   ## Tokenizes one line. `prevState` 1 = inside a block comment from the
-  ## previous line. Returns the trailing state for the next line.
+  ## previous line. Returns the trailing state for the next line. If
+  ## `braceDelta` is non-nil and the rule defines a brace set, the net
+  ## (opens − closes) of those chars outside strings/comments is written
+  ## there — used by the editor to track scope-nesting depth per line.
   spans.setLen(0)
+  if braceDelta != nil: braceDelta[] = 0
   if rule == nil:
     if line.len > 0:
       spans.add(Span(col: 0, n: line.len, kind: tkDefault))
@@ -281,6 +291,9 @@ proc tokenizeLine*(line: string, rule: ptr SyntaxRule,
       spans.add(Span(col: i, n: 1, kind: tkOperator))
       if rule.lang == lkNim and inProcDef and c == ':':
         pendingKind = tkReturnType
+      if braceDelta != nil and c in rule.braces:
+        if c == '{': braceDelta[] += 1
+        elif c == '}': braceDelta[] -= 1
       inc i
       continue
 
@@ -355,8 +368,11 @@ proc paintLine*(painter: ptr Painter, r: Rectangle, line: string,
                ui.theme.codeDefault, cint(ALIGN_LEFT), nil)
 
 proc advanceState*(line: string, rule: ptr SyntaxRule,
-                   prevState: uint8): uint8 =
+                   prevState: uint8,
+                   braceDelta: ptr int = nil): uint8 =
   ## Cheap variant for the editor's lineStartStates cache: tokenize but
-  ## discard spans, just return the trailing state.
+  ## discard spans, just return the trailing state. If `braceDelta` is
+  ## non-nil and the rule has a brace set, the brace nesting delta for
+  ## this line is written there.
   var tmp: seq[Span]
-  return tokenizeLine(line, rule, prevState, tmp)
+  return tokenizeLine(line, rule, prevState, tmp, braceDelta)

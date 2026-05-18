@@ -24,8 +24,15 @@ type
     mode: CursorMode
     syntax: ptr SyntaxRule
     lineStartStates: seq[uint8]   # 1 byte per line (tokenizer entry state)
+    lineIndentCells: seq[int16]   # leading-ws width in cells (-1 = blank line)
+    lineBraceDepth: seq[int16]    # net {/} nesting at line start (brace-mode)
     dirtyFromRow: int             # min row whose entry state may be stale
     spans: seq[Span]              # reused per-paint buffer
+    # Cursor-scope cache for indent guide highlighting. scopeCursorRow == -1
+    # means the cache is stale. scopeSpans[i] is the [lo..hi] row range that
+    # belongs to scope-level (i+1) around the cursor.
+    scopeSpans: seq[tuple[lo, hi: int32]]
+    scopeCursorRow: int
     selAnchorRow, selAnchorCol: int
     hasSel: bool
     extraCursors: seq[ExtraCursor]   # secondary insertion points (Alt+click)
@@ -68,29 +75,71 @@ proc gutterWidth(ed: ptr Editor): cint =
 
 proc invalidateFrom(ed: ptr Editor, row: int) =
   if row < ed.buf.dirtyFromRow: ed.buf.dirtyFromRow = row
+  ed.buf.scopeCursorRow = -1   # any edit can change scope shape
+
+proc indentStepCells(ed: ptr Editor): int =
+  ## Width in cells of one indent step. Tabs render as the same width as the
+  ## host's space indent, so guides line up the same way the gutter does.
+  let s = if ed.host != nil and ed.host.indentString != nil: ed.host.indentString()
+          else: "    "
+  if s.len == 0: 4 else: s.len
+
+proc computeIndentCells(line: string, step: int): int16 =
+  ## Visual indent of the line in cells. Tabs jump to the next multiple of
+  ## `step`. Returns -1 for blank lines (whitespace-only or empty) so callers
+  ## can treat them as transparent for guide drawing.
+  if line.len == 0: return -1
+  var cells = 0
+  var sawNonWS = false
+  for c in line:
+    if c == ' ': inc cells
+    elif c == '\t':
+      let st = max(1, step)
+      cells = ((cells div st) + 1) * st
+    else:
+      sawNonWS = true
+      break
+  if not sawNonWS: return -1
+  int16(cells)
 
 proc refreshStates(ed: ptr Editor, throughRow: int) =
   ## lineStartStates[i] is the tokenizer entry state for line i (1 = inside a
   ## block comment carried over from line i-1). Walks from dirtyFromRow up to
-  ## throughRow, updating downstream entries.
+  ## throughRow, updating downstream entries. Also populates parallel
+  ## lineIndentCells / lineBraceDepth used by scope guides.
   let n = ed.buf.lines.len
   if n == 0:
     ed.buf.lineStartStates.setLen(0)
+    ed.buf.lineIndentCells.setLen(0)
+    ed.buf.lineBraceDepth.setLen(0)
     ed.buf.dirtyFromRow = 0
     return
   if ed.buf.lineStartStates.len != n:
     ed.buf.lineStartStates.setLen(n)   # extend with 0s or truncate
+  if ed.buf.lineIndentCells.len != n:
+    ed.buf.lineIndentCells.setLen(n)
+  if ed.buf.lineBraceDepth.len != n:
+    ed.buf.lineBraceDepth.setLen(n)
   if ed.buf.dirtyFromRow >= n: return
   if ed.buf.dirtyFromRow <= 0:
     ed.buf.lineStartStates[0] = 0
+    ed.buf.lineBraceDepth[0] = 0
     ed.buf.dirtyFromRow = 0
   let stop = min(throughRow, n - 1)
+  let step = indentStepCells(ed)
+  let trackBraces =
+    ed.buf.syntax != nil and ed.buf.syntax.braces != {}
   var i = ed.buf.dirtyFromRow
   while i <= stop:
     let entry = ed.buf.lineStartStates[i]
-    let next = highlight.advanceState(ed.buf.lines[i], ed.buf.syntax, entry)
+    var delta = 0
+    let dp: ptr int = if trackBraces: addr delta else: nil
+    let next = highlight.advanceState(ed.buf.lines[i], ed.buf.syntax, entry, dp)
+    ed.buf.lineIndentCells[i] = computeIndentCells(ed.buf.lines[i], step)
     if i + 1 < n:
       ed.buf.lineStartStates[i + 1] = next
+      let d = ed.buf.lineBraceDepth[i] + int16(delta)
+      ed.buf.lineBraceDepth[i + 1] = if d < 0: 0'i16 else: d
     inc i
   ed.buf.dirtyFromRow = stop + 1
 
@@ -265,6 +314,9 @@ proc applyMultiEdit(ed: ptr Editor,
   dedupeAndScatter(ed, newOffs)
   ed.buf.dirtyFromRow = 0
   ed.buf.lineStartStates.setLen(0)
+  ed.buf.lineIndentCells.setLen(0)
+  ed.buf.lineBraceDepth.setLen(0)
+  ed.buf.scopeCursorRow = -1
 
 proc multiInsertText*(ed: ptr Editor, s: string) =
   if s.len == 0: return
@@ -332,6 +384,9 @@ proc loadIntoBuf(b: var EditorBuf, path: string) =
   b.mode = cmInsert       # caller overrides from host.cursorMode after load
   b.syntax = highlight.syntaxForPath(path)
   b.lineStartStates.setLen(0)
+  b.lineIndentCells.setLen(0)
+  b.lineBraceDepth.setLen(0)
+  b.scopeCursorRow = -1
   b.dirtyFromRow = 0
   b.undoStack.setLen(0)
   b.redoStack.setLen(0)
@@ -398,6 +453,9 @@ proc editorOpenSynthetic*(ed: ptr Editor, synthPath, content: string) =
     b.mode = cmInsert       # overridden below from host
     b.syntax = highlight.syntaxByName("diff")
     b.lineStartStates.setLen(0)
+    b.lineIndentCells.setLen(0)
+    b.lineBraceDepth.setLen(0)
+    b.scopeCursorRow = -1
     b.dirtyFromRow = 0
   var nb: EditorBuf
   fillBuf(nb, synthPath, content)
@@ -478,6 +536,9 @@ proc applySnapshot(b: var EditorBuf, s: Snapshot) =
   b.extraCursors.setLen(0)   # snapshots don't carry multi-cursor state
   b.dirtyFromRow = 0   # rehighlight from top after a structural change
   b.lineStartStates.setLen(0)
+  b.lineIndentCells.setLen(0)
+  b.lineBraceDepth.setLen(0)
+  b.scopeCursorRow = -1
 
 proc pushUndo(ed: ptr Editor, kind: EditKind) =
   ## Snapshot before mutating. Coalesces consecutive same-kind edits at the
@@ -860,6 +921,68 @@ proc visualRowFor(ed: ptr Editor, vrows: seq[VRow], row, col: int): int =
 proc cursorVRowIdx(ed: ptr Editor, vrows: seq[VRow]): int =
   visualRowFor(ed, vrows, ed.buf.cursorRow, ed.buf.cursorCol)
 
+proc lookBackwardIndent(ed: ptr Editor, r: int): int =
+  ## Returns the indent (in cells) of the nearest non-blank row at or before r.
+  ## 0 if none — caller will min() this with the forward fallback.
+  var i = r
+  while i >= 0:
+    if i < ed.buf.lineIndentCells.len:
+      let v = ed.buf.lineIndentCells[i]
+      if v >= 0: return int(v)
+    dec i
+  0
+
+proc lookForwardIndent(ed: ptr Editor, r: int): int =
+  ## Mirror of lookBackwardIndent for the next non-blank row at or after r.
+  var i = r
+  while i < ed.buf.lineIndentCells.len:
+    let v = ed.buf.lineIndentCells[i]
+    if v >= 0: return int(v)
+    inc i
+  0
+
+proc effectiveDepthLevel(ed: ptr Editor, r: int, step: int,
+                         braceMode: bool): int =
+  ## Number of guide levels row r belongs to. Brace-style syntaxes use the
+  ## running {/} nesting at line start; indent-style syntaxes use leading
+  ## whitespace, with blank lines inheriting min(prev, next) indent so guides
+  ## don't fragment across them.
+  if r < 0 or r >= ed.buf.lines.len: return 0
+  if braceMode:
+    if r < ed.buf.lineBraceDepth.len:
+      return int(ed.buf.lineBraceDepth[r])
+    return 0
+  if r >= ed.buf.lineIndentCells.len: return 0
+  let raw = ed.buf.lineIndentCells[r]
+  let cells =
+    if raw >= 0: int(raw)
+    else: min(lookBackwardIndent(ed, r - 1), lookForwardIndent(ed, r + 1))
+  cells div max(1, step)
+
+proc rebuildScopeSpans(ed: ptr Editor) =
+  ## (Re)build cursor scope ranges. scopeSpans[i] holds [lo..hi] for level
+  ## (i+1). Called lazily from paint when scopeCursorRow != cursorRow.
+  ed.buf.scopeSpans.setLen(0)
+  let n = ed.buf.lines.len
+  ed.buf.scopeCursorRow = ed.buf.cursorRow
+  if n == 0: return
+  let step = indentStepCells(ed)
+  let braceMode = ed.buf.syntax != nil and ed.buf.syntax.braces != {}
+  let cR = clamp(ed.buf.cursorRow, 0, n - 1)
+  let cursorDepth = effectiveDepthLevel(ed, cR, step, braceMode)
+  if cursorDepth <= 0: return
+  ed.buf.scopeSpans.setLen(cursorDepth)
+  for b in 1 .. cursorDepth:
+    var lo = cR
+    while lo - 1 >= 0 and
+          effectiveDepthLevel(ed, lo - 1, step, braceMode) >= b:
+      dec lo
+    var hi = cR
+    while hi + 1 < n and
+          effectiveDepthLevel(ed, hi + 1, step, braceMode) >= b:
+      inc hi
+    ed.buf.scopeSpans[b - 1] = (int32(lo), int32(hi))
+
 proc editorMessage(element: ptr Element, message: Message, di: cint, dp: pointer): cint {.cdecl.} =
   let ed = cast[ptr Editor](element)
   if message == msgPaint:
@@ -871,7 +994,15 @@ proc editorMessage(element: ptr Element, message: Message, di: cint, dp: pointer
     let gutterW = gutterWidth(ed)
     let vr = visibleRows(ed)
     let vc = visibleCols(ed)
-    refreshStates(ed, ed.buf.topLine + vr)
+    let guidesOn =
+      ed.host == nil or ed.host.scopeGuides == nil or ed.host.scopeGuides()
+    # When guides are on the scope walker may climb past the visible window,
+    # so the brace-depth / indent caches must be fully populated. Cost is
+    # one-time per edit (dirtyFromRow gates re-walks).
+    let refreshTo =
+      if guidesOn: ed.buf.lines.len - 1
+      else: ed.buf.topLine + vr
+    refreshStates(ed, refreshTo)
     let topColOff = if ed.buf.wrap: 0 else: ed.buf.topCol
     let contentLeft0 = bx + gutterW - cint(topColOff) * gW
     let contentBaseLeft = bx + gutterW
@@ -879,6 +1010,12 @@ proc editorMessage(element: ptr Element, message: Message, di: cint, dp: pointer
     if ed.buf.hasSel:
       (selSR, selSC, selER, selEC) = selOrdered(ed)
     let vrows = buildVisibleRows(ed, by, gH, vr, vc)
+    let guideStep = indentStepCells(ed)
+    let braceMode = ed.buf.syntax != nil and ed.buf.syntax.braces != {}
+    let guideActive = extraTheme.accent
+    let guideDim = dimToward(extraTheme.accent, ui.theme.codeBackground, 0.35)
+    if guidesOn and ed.buf.scopeCursorRow != ed.buf.cursorRow:
+      rebuildScopeSpans(ed)
     for vrow in vrows:
       let rowIdx = vrow.rowIdx
       let y = vrow.y
@@ -911,6 +1048,25 @@ proc editorMessage(element: ptr Element, message: Message, di: cint, dp: pointer
           let x1 = leftX + cint(segHi - cellOff) * gW
           drawBlock(painter, Rectangle(l: x0, r: x1, t: y, b: y + gH),
                     ui.theme.selected)
+      # Scope guides — one 1px vertical bar per indent column the row's depth
+      # reaches. Painted after the selection band so they remain visible when
+      # the row is selected. Wrap-continuation rows (vrow.lo > 0) skip the
+      # draw — the first visual row of the logical row already covers it.
+      if guidesOn and not (ed.buf.wrap and vrow.lo > 0):
+        let depth = effectiveDepthLevel(ed, rowIdx, guideStep, braceMode)
+        if depth > 0:
+          for b in 1 .. depth:
+            let kCells = (b - 1) * guideStep
+            let cx = contentLeft0 + cint(kCells) * gW + 1
+            if cx + 1 <= contentBaseLeft: continue   # scrolled off left
+            if cx >= ed.e.bounds.r: break
+            let active =
+              b - 1 < ed.buf.scopeSpans.len and
+              rowIdx >= int(ed.buf.scopeSpans[b - 1].lo) and
+              rowIdx <= int(ed.buf.scopeSpans[b - 1].hi)
+            drawBlock(painter,
+                      Rectangle(l: cx, r: cx + 1, t: y, b: y + gH),
+                      if active: guideActive else: guideDim)
       if line.len > 0:
         let entry =
           if rowIdx < ed.buf.lineStartStates.len: ed.buf.lineStartStates[rowIdx]
