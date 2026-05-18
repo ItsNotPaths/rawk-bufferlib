@@ -1,0 +1,8 @@
+nimcache/
+build/
+*.o
+examples/basic
+nimble.develop
+nimble.paths
+nimbledeps
+config.nims
