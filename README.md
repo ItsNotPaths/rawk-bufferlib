@@ -1,6 +1,6 @@
 # rawk-bufferlib
 
-Vendorable text-buffer + editor widget for the **Xrawk** Nim GUI suite.
+Vendorable text-buffer + editor widget for the rawk Nim GUI suite.
 Built on top of [rawk-luigi](https://github.com/ItsNotPaths/rawk-luigi)
 (the Xrawk Nim binding to [wayluigi](https://github.com/ItsNotPaths/wayluigi)).
 
