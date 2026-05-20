@@ -376,6 +376,26 @@ proc editorOpenFile*(ed: ptr Editor, path: string) =
   elementRepaint(addr ed.e, nil)
   notifyTabsChanged(ed)
 
+proc editorReplaceActive*(ed: ptr Editor, path: string) =
+  ## Load `path` into the active tab in place, replacing its content and
+  ## identity — "open here" rather than spawning a new tab. If the path is
+  ## already open in another tab, switch to it instead of duplicating. The
+  ## caller is responsible for not clobbering unsaved work (check
+  ## editorTabIsDirty first); this proc replaces unconditionally.
+  if ed == nil or ed.tabs.len == 0: return
+  let existing = findTab(ed, path)
+  if existing >= 0:
+    ed.activeIdx = existing
+    notifyOpened(ed, path)
+    elementRepaint(addr ed.e, nil)
+    notifyTabsChanged(ed)
+    return
+  loadIntoBuf(ed.tabs[ed.activeIdx], path)
+  ed.tabs[ed.activeIdx].mode = currentCursorMode(ed)
+  notifyOpened(ed, path)
+  elementRepaint(addr ed.e, nil)
+  notifyTabsChanged(ed)
+
 proc editorOpenSynthetic*(ed: ptr Editor, synthPath, content: string) =
   ## Opens a non-disk buffer (e.g. a git diff). `synthPath` is used as the
   ## tab's identity for dedupe; saving is a no-op for paths starting with
@@ -722,6 +742,37 @@ proc editorJumpRelative*(ed: ptr Editor, delta: int) =
   followCursor(ed)
   elementRepaint(addr ed.e, nil)
 
+proc editorInsertText*(ed: ptr Editor, s: string) =
+  ## Host-facing insert at the caret(s): one undo step, newline-aware, lands
+  ## at the primary cursor and every extra cursor. Used by the CL `put`
+  ## prefix to drop command output into the buffer.
+  if ed == nil or s.len == 0: return
+  pushUndo(ed, ekOther)
+  multiInsertText(ed, s)
+  noteEditEnd(ed)
+  clampCursor(ed)
+  followCursor(ed)
+  elementRepaint(addr ed.e, nil)
+
+proc editorSelectionText*(ed: ptr Editor): string =
+  ## The primary selection's text, or "" when nothing is selected.
+  if ed == nil: "" else: selCopyText(ed)
+
+proc editorReplaceSelection*(ed: ptr Editor, s: string) =
+  ## Replace the primary selection with `s` in one undo step (newline-aware),
+  ## caret left after the inserted text. No-op without a selection. Extra
+  ## cursors are dropped first so the swap happens only at the selection.
+  ## Used by the CL `pipeout` prefix.
+  if ed == nil or not ed.buf.hasSel: return
+  clearExtraCursors(ed)
+  pushUndo(ed, ekOther)
+  deleteSelection(ed)
+  multiInsertText(ed, s)
+  noteEditEnd(ed)
+  clampCursor(ed)
+  followCursor(ed)
+  elementRepaint(addr ed.e, nil)
+
 proc editorTabCount*(ed: ptr Editor): int =
   if ed == nil: 0 else: ed.tabs.len
 
@@ -745,6 +796,7 @@ proc activeBuf*(ed: ptr Editor): ptr EditorBuf =
 proc bufLines*(b: ptr EditorBuf): lent seq[string] = b.lines
 proc bufTopLine*(b: ptr EditorBuf): int = b.topLine
 proc bufCursorRow*(b: ptr EditorBuf): int = b.cursorRow
+proc bufCursorCol*(b: ptr EditorBuf): int = b.cursorCol
 proc bufDirtyFromRow*(b: ptr EditorBuf): int = b.dirtyFromRow
 proc bufSyntax*(b: ptr EditorBuf): ptr SyntaxRule = b.syntax
 proc bufLineStartStates*(b: ptr EditorBuf): ptr seq[uint8] = addr b.lineStartStates

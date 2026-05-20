@@ -17,6 +17,12 @@ type
     lang*: LangKind
     extensions*: seq[string]
     keywords*: HashSet[string]
+    defKeywords*: seq[string]
+      ## Declaration keywords for goto-definition (conf key `def_keywords`),
+      ## e.g. `proc func type` for nim. A consumer greps for one of these
+      ## followed by the symbol. Ordered seq (not a set) so the host can join
+      ## it straight into a regex alternation. Empty when the language has no
+      ## keyword-prefixed declarations (or none was configured).
     commentLine*: string
     commentOpen*, commentClose*: string
     stringDelims*: set[char]
@@ -82,6 +88,9 @@ proc parseRule(name, body: string): SyntaxRule =
     of "keywords":
       for kw in val.split({' ', '\t'}):
         if kw.len > 0: result.keywords.incl(kw)
+    of "def_keywords":
+      for kw in val.split({' ', '\t'}):
+        if kw.len > 0: result.defKeywords.add(kw)
     else: discard            # scope_* keys reserved for future tmTheme loader
 
 proc loadAllSyntaxes*() =
