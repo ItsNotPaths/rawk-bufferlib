@@ -282,6 +282,11 @@ proc tokenizeLine*(line: string, rule: ptr SyntaxRule,
       elif pendingKind != tkDefault:
         spans.add(Span(col: start, n: i - start, kind: pendingKind))
         pendingKind = tkDefault
+      elif i < n and line[i] == '(':
+        # Call site: identifier immediately followed by '(' is a function/proc.
+        # Language keywords (`if`, `while`, `sizeof`, …) hit the keyword branch
+        # above so they never reach here.
+        spans.add(Span(col: start, n: i - start, kind: tkProcName))
       # else: leave as default (no span needed; gap between spans paints default)
       continue
 
