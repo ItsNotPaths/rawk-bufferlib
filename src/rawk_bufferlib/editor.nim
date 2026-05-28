@@ -615,18 +615,20 @@ proc indentUnit(ed: ptr Editor): string {.inline.} =
   if ed.host != nil and ed.host.indentString != nil: ed.host.indentString()
   else: "    "
 
-proc isBracketLang(ed: ptr Editor, c: char): bool {.inline.} =
-  ## A bracket only auto-closes in a language whose syntax config lists it as
-  ## an operator (c/cpp/js/python/nim/odin do; markdown/diff/plaintext don't).
-  ed.buf.syntax != nil and c in ed.buf.syntax.operators
+proc bracketsAllowed(ed: ptr Editor, c: char): bool {.inline.} =
+  ## Auto-close is on for code and for plain / scratch / unknown buffers (no
+  ## syntax rule). A language opts out by defining operators that omit the
+  ## bracket — markdown and diff do, so prose isn't peppered with closers.
+  let s = ed.buf.syntax
+  s == nil or c in s.operators
 
 proc handleBracketInput(ed: ptr Editor, s: string): bool =
   ## Bracket auto-close / skip-over. Returns true when it fully handled the
   ## keystroke; false means "insert `s` the normal way". Only acts on a single
-  ## bracket char in a bracket language with the feature enabled.
+  ## bracket char, with the feature enabled, in a buffer that allows it.
   if s.len != 1 or not autoCloseEnabled(ed): return false
   let c = s[0]
-  if (c notin openBrackets and c notin closeBrackets) or not isBracketLang(ed, c):
+  if (c notin openBrackets and c notin closeBrackets) or not bracketsAllowed(ed, c):
     return false
   let line = ed.buf.lines[ed.buf.cursorRow]
   let col = ed.buf.cursorCol
@@ -664,10 +666,11 @@ proc handleBracketBackspace(ed: ptr Editor): bool =
   false
 
 proc insertNewlineAutoIndent(ed: ptr Editor) =
-  ## Enter, carrying the current line's indentation. Splitting a bracket pair
-  ## (`{|}`) opens a three-line block: the middle (cursor) line is indented one
-  ## unit deeper, the closer drops back to the base indent. A lone trailing
-  ## opener (`{|`) indents the new line one unit deeper.
+  ## Enter, carrying the current line's indentation. A curly pair (`{|}`) opens
+  ## a three-line block: the cursor lands on a middle line indented one unit
+  ## deeper, the `}` drops to the line below at the base indent. A lone trailing
+  ## `{` indents the new line one unit deeper. Other brackets — `()`, `[]` — get
+  ## a plain indent-carrying split with no extra block logic.
   if not autoIndentEnabled(ed):
     insertNewline(ed); return
   let row = ed.buf.cursorRow
@@ -682,7 +685,7 @@ proc insertNewlineAutoIndent(ed: ptr Editor) =
   let after  = if col < line.len: line[col] else: '\0'
   let head = line.substr(0, col - 1)
   let tail = line.substr(col)
-  if before in openBrackets and after == closerFor(before):
+  if before == '{' and after == '}':
     let inner = indent & indentUnit(ed)
     ed.buf.lines[row] = head
     ed.buf.lines.insert(indent & tail, row + 1)
@@ -690,7 +693,7 @@ proc insertNewlineAutoIndent(ed: ptr Editor) =
     ed.buf.cursorRow = row + 1
     ed.buf.cursorCol = inner.len
   else:
-    let newIndent = if before in openBrackets: indent & indentUnit(ed) else: indent
+    let newIndent = if before == '{': indent & indentUnit(ed) else: indent
     ed.buf.lines[row] = head
     ed.buf.lines.insert(newIndent & tail, row + 1)
     ed.buf.cursorRow = row + 1
