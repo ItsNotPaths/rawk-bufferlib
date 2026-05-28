@@ -589,6 +589,115 @@ proc backspace(ed: ptr Editor) =
 proc isWS(c: char): bool {.inline.} =
   c == ' ' or c == '\t'
 
+const
+  openBrackets  = {'(', '[', '{'}
+  closeBrackets = {')', ']', '}'}
+
+proc closerFor(c: char): char {.inline.} =
+  case c
+  of '(': ')'
+  of '[': ']'
+  of '{': '}'
+  else: '\0'
+
+proc leadingWhitespace(line: string): string {.inline.} =
+  var i = 0
+  while i < line.len and isWS(line[i]): inc i
+  line[0 ..< i]
+
+proc autoCloseEnabled(ed: ptr Editor): bool {.inline.} =
+  ed.host == nil or ed.host.autoCloseBrackets == nil or ed.host.autoCloseBrackets()
+
+proc autoIndentEnabled(ed: ptr Editor): bool {.inline.} =
+  ed.host == nil or ed.host.autoIndent == nil or ed.host.autoIndent()
+
+proc indentUnit(ed: ptr Editor): string {.inline.} =
+  if ed.host != nil and ed.host.indentString != nil: ed.host.indentString()
+  else: "    "
+
+proc isBracketLang(ed: ptr Editor, c: char): bool {.inline.} =
+  ## A bracket only auto-closes in a language whose syntax config lists it as
+  ## an operator (c/cpp/js/python/nim/odin do; markdown/diff/plaintext don't).
+  ed.buf.syntax != nil and c in ed.buf.syntax.operators
+
+proc handleBracketInput(ed: ptr Editor, s: string): bool =
+  ## Bracket auto-close / skip-over. Returns true when it fully handled the
+  ## keystroke; false means "insert `s` the normal way". Only acts on a single
+  ## bracket char in a bracket language with the feature enabled.
+  if s.len != 1 or not autoCloseEnabled(ed): return false
+  let c = s[0]
+  if (c notin openBrackets and c notin closeBrackets) or not isBracketLang(ed, c):
+    return false
+  let line = ed.buf.lines[ed.buf.cursorRow]
+  let col = ed.buf.cursorCol
+  let after = if col < line.len: line[col] else: '\0'
+  if c in closeBrackets:
+    # Skip over an existing closer rather than inserting a duplicate.
+    if after == c:
+      ed.buf.cursorCol = col + 1
+      return true
+    return false
+  # Opener: also insert the closer, but only when that wouldn't split an
+  # existing token — i.e. at end of line, or before whitespace / a closer.
+  # Leave the cursor between the pair.
+  if after == '\0' or isWS(after) or after in closeBrackets:
+    insertText(ed, s & closerFor(c))
+    ed.buf.cursorCol = col + 1
+    return true
+  false
+
+proc handleBracketBackspace(ed: ptr Editor): bool =
+  ## Backspace inside an empty pair (`{|}`) removes both halves. Returns true
+  ## when handled.
+  if not autoCloseEnabled(ed): return false
+  let row = ed.buf.cursorRow
+  let col = ed.buf.cursorCol
+  let line = ed.buf.lines[row]
+  if col == 0 or col >= line.len: return false
+  let before = line[col - 1]
+  if before in openBrackets and line[col] == closerFor(before):
+    ed.buf.lines[row] = line.substr(0, col - 2) & line.substr(col + 1)
+    ed.buf.cursorCol = col - 1
+    markDirty(ed)
+    invalidateFrom(ed, row)
+    return true
+  false
+
+proc insertNewlineAutoIndent(ed: ptr Editor) =
+  ## Enter, carrying the current line's indentation. Splitting a bracket pair
+  ## (`{|}`) opens a three-line block: the middle (cursor) line is indented one
+  ## unit deeper, the closer drops back to the base indent. A lone trailing
+  ## opener (`{|`) indents the new line one unit deeper.
+  if not autoIndentEnabled(ed):
+    insertNewline(ed); return
+  let row = ed.buf.cursorRow
+  let col = ed.buf.cursorCol
+  let line = ed.buf.lines[row]
+  let indent = leadingWhitespace(line)
+  # Cursor sitting within the leading whitespace: re-indenting would duplicate
+  # it, so fall back to a plain split.
+  if col < indent.len:
+    insertNewline(ed); return
+  let before = if col > 0: line[col - 1] else: '\0'
+  let after  = if col < line.len: line[col] else: '\0'
+  let head = line.substr(0, col - 1)
+  let tail = line.substr(col)
+  if before in openBrackets and after == closerFor(before):
+    let inner = indent & indentUnit(ed)
+    ed.buf.lines[row] = head
+    ed.buf.lines.insert(indent & tail, row + 1)
+    ed.buf.lines.insert(inner, row + 1)
+    ed.buf.cursorRow = row + 1
+    ed.buf.cursorCol = inner.len
+  else:
+    let newIndent = if before in openBrackets: indent & indentUnit(ed) else: indent
+    ed.buf.lines[row] = head
+    ed.buf.lines.insert(newIndent & tail, row + 1)
+    ed.buf.cursorRow = row + 1
+    ed.buf.cursorCol = newIndent.len
+  markDirty(ed)
+  invalidateFrom(ed, row)
+
 proc wordForward(ed: ptr Editor) =
   ## Vim-W-like jump: skip current run (whitespace or non-whitespace), then
   ## land on the start of the next non-whitespace block. Wraps to next line.
@@ -1335,14 +1444,15 @@ proc editorMessage(element: ptr Element, message: Message, di: cint, dp: pointer
     elif code == int(KEYCODE_ENTER):
       pushUndo(ed, ekOther)
       editStart()
-      if ed.buf.extraCursors.len == 0: insertNewline(ed)
+      if ed.buf.extraCursors.len == 0: insertNewlineAutoIndent(ed)
       else: multiInsertText(ed, "\n")
       noteEditEnd(ed)
     elif code == int(KEYCODE_BACKSPACE):
       if ed.buf.hasSel:
         pushUndo(ed, ekOther); deleteSelection(ed)
       elif ed.buf.extraCursors.len == 0:
-        pushUndo(ed, ekBackspace); backspace(ed)
+        pushUndo(ed, ekBackspace)
+        if not handleBracketBackspace(ed): backspace(ed)
       else:
         pushUndo(ed, ekBackspace); multiBackspace(ed)
       noteEditEnd(ed)
@@ -1361,7 +1471,8 @@ proc editorMessage(element: ptr Element, message: Message, di: cint, dp: pointer
       editStart()
       var s = newString(int(k.textBytes))
       copyMem(addr s[0], k.text, int(k.textBytes))
-      if ed.buf.extraCursors.len == 0: insertText(ed, s)
+      if ed.buf.extraCursors.len == 0:
+        if not handleBracketInput(ed, s): insertText(ed, s)
       else: multiInsertText(ed, s)
       noteEditEnd(ed)
     else:

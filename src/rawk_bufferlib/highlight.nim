@@ -6,7 +6,7 @@ type
     tkDefault, tkKeyword, tkString, tkComment, tkNumber, tkOperator,
     tkProcName, tkTypeName, tkReturnType
 
-  LangKind* = enum lkGeneric, lkNim, lkDiff, lkMarkdown
+  LangKind* = enum lkGeneric, lkNim, lkDiff, lkMarkdown, lkOdin
 
   Span* = object
     col*, n*: int
@@ -41,12 +41,13 @@ const nimProcKeywords = ["proc", "func", "iterator", "template", "macro",
 template embedSyntax(n: untyped): (string, string) =
   (astToStr(n), staticRead("syntax/" & astToStr(n) & ".conf"))
 
-const builtinSyntaxes*: array[7, (string, string)] = [
+const builtinSyntaxes*: array[8, (string, string)] = [
   embedSyntax(nim),
   embedSyntax(c),
   embedSyntax(cpp),
   embedSyntax(python),
   embedSyntax(js),
+  embedSyntax(odin),
   embedSyntax(diff),
   embedSyntax(markdown),
 ]
@@ -66,6 +67,7 @@ proc parseRule(name, body: string): SyntaxRule =
   if name == "nim": result.lang = lkNim
   elif name == "diff": result.lang = lkDiff
   elif name == "markdown": result.lang = lkMarkdown
+  elif name == "odin": result.lang = lkOdin
   for raw in body.splitLines():
     let line = raw.strip()
     if line.len == 0 or line.startsWith('#'): continue

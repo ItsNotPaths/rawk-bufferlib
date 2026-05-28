@@ -12,6 +12,12 @@ type
     lineNumbers*:     proc(): LineNumberMode {.closure.}
     cursorMode*:      proc(): CursorMode     {.closure.}
     cursorJumpLines*: proc(): int            {.closure.}
+    autoCloseBrackets*: proc(): bool         {.closure.}
+      ## Whether typing an opening bracket inserts its matching closer (with
+      ## skip-over and pair-backspace following). Nil is treated as enabled.
+    autoIndent*:      proc(): bool           {.closure.}
+      ## Whether Enter carries the current line's indentation and opens a block
+      ## when splitting a bracket pair. Nil is treated as enabled.
     recordOpen*:      proc(path: string)     {.closure.}
       ## Called when the editor successfully opens a real (non-synthetic) file.
       ## Host typically uses this to update a recent-files list.
@@ -29,5 +35,7 @@ proc defaultHost*(): EditorHost =
     lineNumbers:     proc(): LineNumberMode = lnmGlobal,
     cursorMode:      proc(): CursorMode     = cmInsert,
     cursorJumpLines: proc(): int            = 10,
+    autoCloseBrackets: proc(): bool         = true,
+    autoIndent:      proc(): bool           = true,
     recordOpen:      proc(path: string)     = discard,
     onTabsChanged:   proc()                 = discard)
