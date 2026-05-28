@@ -1190,6 +1190,10 @@ proc editorMessage(element: ptr Element, message: Message, di: cint, dp: pointer
         ed.buf.hasSel = false
 
     template motionEnd() =
+      # Clamp before reading the selection: a motion can leave the cursor out
+      # of bounds (e.g. shift+Down past the last line), and selCopyText would
+      # index that row. The plain-arrow branch only clamps after motionEnd.
+      clampCursor(ed)
       if ed.buf.hasSel and
          ed.buf.selAnchorRow == ed.buf.cursorRow and
          ed.buf.selAnchorCol == ed.buf.cursorCol:
